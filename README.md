@@ -46,6 +46,51 @@ Cliente unificado para as APIs da Efí:
 
 Documentacao detalhada: [`docs/efi_endpoints.md`](docs/efi_endpoints.md).
 
+### `relatorio_inadimplentes.py`
+Script CLI que une LivePDV + Efí e gera tabela consolidada das marcas inadimplentes.
+
+```bash
+# Visualizar formato com dados ficticios (nao precisa credenciais)
+python relatorio_inadimplentes.py --mock
+
+# Rodar com dados reais (precisa .env configurado)
+python relatorio_inadimplentes.py --real
+
+# Filtros e exportacao
+python relatorio_inadimplentes.py --real --dias 7 --csv
+python relatorio_inadimplentes.py --real --cnpj 12345678000190
+```
+
+**Exemplo de saida (mock):**
+
+```
++----+--------------------+--------------------+------+--------------+--------------+--------+---------------------------------+
+| #  | Marca              | CNPJ               | Dias | Em aberto    | Bloqueio     | Classe | Acao sugerida                   |
++----+--------------------+--------------------+------+--------------+--------------+--------+---------------------------------+
+| 1  | Moda Vivace        | 45.678.901/0001-23 |   62 | R$ 5.700,00  | vendas       | C      | bloqueio_acesso (nivel 5) URGEN |
+| 2  | Bijoux Estrela     | 12.345.678/0001-90 |   45 | R$ 3.200,00  | nenhum       | C      | bloqueio_total = principal=Nao  |
+| 3  | Atelier Lua        | 23.456.789/0001-01 |   18 | R$ 1.450,00  | recebimento  | B      | bloqueio_recebimento (nivel 1)  |
+| 4  | Boutique Sol       | 34.567.890/0001-12 |    7 | R$   890,00  | nenhum       | B      | observar (alerta Gmail apenas)  |
+| 5  | Acessorios Mar     | 56.789.012/0001-34 |    3 | R$   420,00  | nenhum       | A      | observar (alerta Gmail apenas)  |
++----+--------------------+--------------------+------+--------------+--------------+--------+---------------------------------+
+
+RESUMO
+  Total inadimplentes:    5 marcas
+  Valor total em aberto:  R$ 11.660,00
+  Maior atraso:           62 dias (Moda Vivace)
+```
+
+A sugestao de acao e calculada por `sugerir_acao()`:
+
+| Dias atraso | Acao recomendada |
+|-------------|------------------|
+| 0–5         | observar (alerta Gmail apenas) |
+| 6–15 (A)    | alerta + bloqueio_recebimento (nivel 1) |
+| 6–30        | bloqueio_recebimento (nivel 1) |
+| 31–45       | bloqueio_total — principal=Nao (nivel 3) |
+| 46–60       | bloqueio_vendas (nivel 4) |
+| 60+         | bloqueio_acesso (nivel 5) URGENTE |
+
 ## Setup
 
 ```bash
@@ -65,26 +110,27 @@ pip install -r requirements.txt
 cp .env.example .env
 # Edite .env com suas credenciais reais
 
-# 5. Testar LivePDV
-python livepdv_client.py
+# 5. Ver relatorio com dados ficticios
+python relatorio_inadimplentes.py --mock
 
-# 6. Testar Efí
-python efi_client.py
+# 6. Quando tiver credenciais Efi
+python relatorio_inadimplentes.py --real --csv
 ```
 
 ## Estrutura
 
 ```
 integrador/
-├── .env.example          # template de variaveis de ambiente
-├── .gitignore            # ignora .env, .venv, certs/, __pycache__
-├── requirements.txt      # requests, beautifulsoup4, lxml, python-dotenv
-├── README.md             # este arquivo
-├── livepdv_client.py     # cliente LivePDV/Moombox
-├── efi_client.py         # cliente Efí (Pagamentos + PIX)
+├── .env.example                  # template de variaveis de ambiente
+├── .gitignore                    # ignora .env, .venv, certs/, __pycache__
+├── requirements.txt              # requests, beautifulsoup4, lxml, python-dotenv, tabulate
+├── README.md                     # este arquivo
+├── livepdv_client.py             # cliente LivePDV/Moombox
+├── efi_client.py                 # cliente Efí (Pagamentos + PIX)
+├── relatorio_inadimplentes.py    # CLI: une LivePDV + Efí em tabela consolidada
 └── docs/
-    ├── livepdv_endpoints.md   # mapeamento dos 11 endpoints LivePDV
-    └── efi_endpoints.md       # mapeamento das 2 APIs Efí
+    ├── livepdv_endpoints.md      # mapeamento dos 11 endpoints LivePDV
+    └── efi_endpoints.md          # mapeamento das 2 APIs Efí
 ```
 
 ## Seguranca
@@ -98,6 +144,7 @@ integrador/
 
 - [x] livepdv_client.py (login, listagens, 5 niveis de bloqueio)
 - [x] efi_client.py (Pagamentos + PIX, deteccao de inadimplencia por CNPJ)
+- [x] relatorio_inadimplentes.py (CLI com modo mock e real)
 - [ ] airtable_client.py (CRUD da base de marcas, upsert por nome_fantasia)
 - [ ] asaas_client.py (segunda fonte de cobrancas)
 - [ ] gmail_notifier.py (envio de alertas)
