@@ -9,6 +9,7 @@ Uso:
     python relatorio_inadimplentes.py --mock                   # exemplo rápido
     python relatorio_inadimplentes.py --real                   # produção
     python relatorio_inadimplentes.py --real --csv             # exporta CSV
+    python relatorio_inadimplentes.py --real --excel boletos.xlsx  # usa planilha em vez de Efi
     python relatorio_inadimplentes.py --real --cnpj 00000      # uma marca só
     python relatorio_inadimplentes.py --real --dias 7          # só >= 7 dias atraso
 
@@ -116,7 +117,7 @@ def gerar_mock():
 # ============================================================================
 # Coleta real
 # ============================================================================
-def coletar_real(dias_min: int = 1, cnpj_filtro: Optional[str] = None):
+def coletar_real(dias_min: int = 1, cnpj_filtro: Optional[str] = None, excel_path: Optional[str] = None):
     """
     Conecta LivePDV + Efí.
     Requer variáveis de ambiente:
@@ -175,19 +176,30 @@ def coletar_real(dias_min: int = 1, cnpj_filtro: Optional[str] = None):
         print(f"      ! {type(exc).__name__}: {exc}")
         print(f"      ! Continuando sem dados do LivePDV (nomes de marca virao como 'CNPJ XXX')")
 
-    # ------------------------- Efí -------------------------
+    # ------------------------- Fonte de inadimplencia -------------------------
     inadimplentes = {}
-    print("[2/4] Listando cobrancas vencidas na Efi...", end=" ", flush=True)
-    try:
-        efi = EfiClient()
-        inadimplentes = efi.consolidar_todos_inadimplentes(dias_atraso_min=dias_min)
-        print(f"OK ({len(inadimplentes)} CNPJs inadimplentes)")
-    except Exception as exc:
-        print("FALHOU")
-        print(f"      ! {type(exc).__name__}: {exc}")
-        print("      ! Verifique credenciais EFI_CLIENT_ID / EFI_CLIENT_SECRET / EFI_PIX_CERT_PATH")
-        # ainda retorna vazio pra nao crashar
-        return []
+    if excel_path:
+        print(f"[2/4] Lendo planilha Excel ({excel_path})...", end=" ", flush=True)
+        try:
+            from excel_inadimplentes import carregar_inadimplentes, consolidar_por_cnpj
+            itens = carregar_inadimplentes(excel_path)
+            inadimplentes = consolidar_por_cnpj(itens)
+            print(f"OK ({len(inadimplentes)} CNPJs inadimplentes)")
+        except Exception as exc:
+            print("FALHOU")
+            print(f"      ! {type(exc).__name__}: {exc}")
+            return []
+    else:
+        print("[2/4] Listando cobrancas vencidas na Efi...", end=" ", flush=True)
+        try:
+            efi = EfiClient()
+            inadimplentes = efi.consolidar_todos_inadimplentes(dias_atraso_min=dias_min)
+            print(f"OK ({len(inadimplentes)} CNPJs inadimplentes)")
+        except Exception as exc:
+            print("FALHOU")
+            print(f"      ! {type(exc).__name__}: {exc}")
+            print("      ! Verifique credenciais EFI_CLIENT_ID / EFI_CLIENT_SECRET / EFI_PIX_CERT_PATH")
+            return []
 
     # ------------------------- Cruzamento -------------------------
     print("[3/4] Cruzando CNPJs LivePDV x Efi...", end=" ", flush=True)
@@ -307,6 +319,7 @@ def main():
     p.add_argument("--dias", type=int, default=1)
     p.add_argument("--cnpj", type=str, default=None)
     p.add_argument("--csv", action="store_true")
+    p.add_argument("--excel", type=str, default=None, help="Caminho do .xlsx exportado da Efi (Receber > Boletos)")
     args = p.parse_args()
 
     if args.mock:
@@ -314,7 +327,7 @@ def main():
         modo = "mock"
     else:
         try:
-            linhas = coletar_real(dias_min=args.dias, cnpj_filtro=args.cnpj)
+            linhas = coletar_real(dias_min=args.dias, cnpj_filtro=args.cnpj, excel_path=args.excel)
         except Exception:
             print("\n[ERRO FATAL] Algo deu errado na coleta:")
             traceback.print_exc()
