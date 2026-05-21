@@ -27,6 +27,7 @@ import traceback
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
+from classificador import classificar
 
 
 # ============================================================================
@@ -226,7 +227,7 @@ def coletar_real(dias_min: int = 1, cnpj_filtro: Optional[str] = None):
                 dias_atraso=int(dados.get("dias_max", 0) or 0),
                 valor_aberto=float(dados.get("total_aberto", 0.0)),
                 bloqueio_atual=bloq,
-                classe="?",
+                classe=classificar(dados.get("vendas_30d"), dados.get("aluguel")),
                 boletos=len(dados.get("boletos", [])),
                 pix_cobv=len(dados.get("pix_cobv", [])),
             )
