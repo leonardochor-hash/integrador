@@ -345,10 +345,123 @@ class LivePDVClient:
         logger.info("Fornecedor %s: bloqueio_vendas=%s", fornecedor_id, valor)
         return True
 
+    # =================================================================
+    #  Vendas - relatorio consolidado por expositor
+    # =================================================================
+
+    def get_vendas_consolidado_expositor(self, dias=30, per_page=5000):
+        """Le o "Relatorio Consolidado Expositor" do LivePDV.
+
+        Retorna lista de dicts com:
+            {
+                "loja": str,
+                "expositor": str,
+                "total_vendas": float,
+                "cupons_validos": int,
+                "ticket_medio": float,
+                "total_itens": int,
+                "produtos_por_atendimento": float,
+            }
+
+        :param dias: janela em dias contando para tras a partir de hoje (default 30).
+        :param per_page: quantidade maxima de linhas por pagina (default 5000).
+        """
+        from datetime import date, timedelta
+
+        hoje = date.today()
+        inicio = hoje - timedelta(days=dias)
+        data_param = (
+            inicio.strftime("%d/%m/%Y") + " - " + hoje.strftime("%d/%m/%Y")
+        )
+
+        url = self._url("/relatorios/relatorio-consolidado-expositor")
+        resp = self.session.get(
+            url,
+            params={"data": data_param, "per-page": per_page},
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+
+        soup = self._soup(resp.text)
+        grid = soup.find("table", class_="kv-grid-table")
+        if not grid:
+            return []
+
+        rows = []
+        for tr in grid.find_all("tr"):
+            tds = [td.get_text(" ", strip=True) for td in tr.find_all("td")]
+            if len(tds) < 7:
+                continue
+            loja, expositor, total_vendas, cupons, ticket, itens, ppa = tds[:7]
+            # Linhas de filtro/total geral nao tem dados validos
+            if not expositor or expositor in {"Total Geral", "Digite uma Loja"}:
+                continue
+            rows.append({
+                "loja": loja,
+                "expositor": expositor,
+                "total_vendas": _to_float_br(total_vendas),
+                "cupons_validos": _safe_int(cupons),
+                "ticket_medio": _to_float_br(ticket),
+                "total_itens": _safe_int(itens),
+                "produtos_por_atendimento": _to_float_br(ppa),
+            })
+        return rows
+
+    def get_vendas_30d_por_nome(self, dias=30):
+        """Dicionario nome_normalizado -> total_vendas (float) para os ultimos
+        `dias` dias. Util para cruzamento por nome da marca quando o relatorio
+        nao expoe CNPJ."""
+        vendas = self.get_vendas_consolidado_expositor(dias=dias)
+        out = {}
+        for v in vendas:
+            nome_norm = _norm_marca(v["expositor"])
+            if not nome_norm:
+                continue
+            out[nome_norm] = out.get(nome_norm, 0.0) + float(v["total_vendas"] or 0.0)
+        return out
+
+
+
 
 # =====================================================================
 #  Helpers de parsing
 # =====================================================================
+
+def _to_float_br(s):
+    """Converte string no formato brasileiro/US para float. Aceita '1.234,56',
+    '1234.56', '-299.00', '' (=> 0.0)."""
+    if s is None:
+        return 0.0
+    if isinstance(s, (int, float)):
+        return float(s)
+    s = str(s).strip().replace("R$", "").replace(" ", "")
+    if not s:
+        return 0.0
+    if "," in s and "." in s:
+        s = s.replace(".", "").replace(",", ".")
+    elif "," in s:
+        s = s.replace(",", ".")
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
+
+def _norm_marca(nome):
+    """Normaliza nome de marca para comparacao: lowercase, sem acento,
+    espaco simples, sem pontuacao."""
+    import re, unicodedata
+    if not nome:
+        return ""
+    s = unicodedata.normalize("NFD", str(nome))
+    s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+    s = s.lower()
+    s = re.sub(r"[^a-z0-9 ]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+
 def _sim_nao(s):
     return s.strip().lower() in ("sim", "1", "true", "yes")
 
