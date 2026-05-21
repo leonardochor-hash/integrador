@@ -4,11 +4,11 @@ Integrador Python para classificar marcas inadimplentes no **LivePDV / Moombox**
 
 ## Stack de integracao prevista
 
-- **LivePDV / Moombox** (origem das vendas reais e ponto de aplicacao dos bloqueios)
-- **Efi / Asaas** (cobrancas e conciliacao financeira)
-- **Airtable** (dashboard / base de dados de marcas e contratos)
-- **Zoho** (CRM)
-- **Gmail** (notificacoes automatizadas)
+- **LivePDV / Moombox** (origem das vendas reais e ponto de aplicacao dos bloqueios) — ✅ implementado
+- **Efí / Asaas** (cobrancas e conciliacao financeira) — ✅ Efí implementado · Asaas pendente
+- **Airtable** (dashboard / base de dados de marcas e contratos) — ⏳ pendente
+- **Zoho** (CRM) — ⏳ pendente
+- **Gmail** (notificacoes automatizadas) — ⏳ pendente
 
 ## Estrategia
 
@@ -24,106 +24,88 @@ A linha dorsal e o LivePDV. Partimos das vendas reais dos ultimos 30 dias para d
 
 ### Escala de bloqueio (acoes automatizadas no LivePDV)
 
-| Classificacao | Acao |
-|---------------|------|
-| Marca A | Nenhuma |
-| Marca B | `bloqueio_recebimento=1` (Zoop, leve) |
-| Marca C | `principal=0` (Zoop, repasse total) |
-| Atraso grave | `Fornecedores[bloqueio_vendas]=1` (nao vende mais) |
-| Inadimplencia critica | `Fornecedores[bloqueio_acesso]=1` (nao loga mais) |
+| Nivel | Acao | Endpoint / Campo |
+|-------|------|------------------|
+| 1 — Recebimento (leve) | Trava repasse do Zoop | `POST /zoop/cadastro-zoop/inline-update` · `bloqueio_recebimento=1` |
+| 2 — Politica detalhada | Salva politica customizada | `POST /zoop/cadastro-zoop/save-policy` |
+| 3 — Repasse total | Marca `Principal = Nao` | `POST /zoop/cadastro-zoop/inline-update` · `principal=0` |
+| 4 — Bloqueio de vendas | Marca campo no expositor | `POST /configura/fornecedores/update` · `bloqueio_vendas=1` |
+| 5 — Bloqueio de acesso | Trava login do expositor | `POST /configura/fornecedores/update` · `bloqueio_acesso=1` |
 
-## Estrutura do projeto
+## Modulos disponiveis
+
+### `livepdv_client.py`
+Cliente HTTP autenticado para o LivePDV (Yii2 + PJAX). Faz login com CSRF, lista expositores, lista marcas no cadastro Zoop, executa os 5 niveis de bloqueio descritos acima e tem helpers para cruzar expositor ↔ marca.
+
+### `efi_client.py`
+Cliente unificado para as APIs da Efí:
+
+- `EfiPagamentosClient` — boletos/carnês via Basic Auth (`/v1/charges`)
+- `EfiPixClient` — cobrancas PIX via OAuth2 + mTLS (`/v2/cob`, `/v2/cobv`)
+- `EfiClient` (wrapper) — consolida ambas e expoe `listar_inadimplentes_por_cnpj()` e `consolidar_todos_inadimplentes()` cruzando por CNPJ.
+
+Documentacao detalhada: [`docs/efi_endpoints.md`](docs/efi_endpoints.md).
+
+## Setup
+
+```bash
+# 1. Clonar
+git clone https://github.com/leonardochor-hash/integrador.git
+cd integrador
+
+# 2. Ambiente virtual
+python -m venv .venv
+source .venv/bin/activate   # Linux/Mac
+# .venv\Scripts\activate     # Windows
+
+# 3. Dependencias
+pip install -r requirements.txt
+
+# 4. Configurar credenciais
+cp .env.example .env
+# Edite .env com suas credenciais reais
+
+# 5. Testar LivePDV
+python livepdv_client.py
+
+# 6. Testar Efí
+python efi_client.py
+```
+
+## Estrutura
 
 ```
 integrador/
-|- README.md
-|- requirements.txt
-|- .env.example          # template - copie para .env e preencha
-|- .gitignore
-|- livepdv_client.py     # cliente HTTP autenticado contra LivePDV
-`- docs/
-   `- livepdv_endpoints.md   # mapa completo dos endpoints
+├── .env.example          # template de variaveis de ambiente
+├── .gitignore            # ignora .env, .venv, certs/, __pycache__
+├── requirements.txt      # requests, beautifulsoup4, lxml, python-dotenv
+├── README.md             # este arquivo
+├── livepdv_client.py     # cliente LivePDV/Moombox
+├── efi_client.py         # cliente Efí (Pagamentos + PIX)
+└── docs/
+    ├── livepdv_endpoints.md   # mapeamento dos 11 endpoints LivePDV
+    └── efi_endpoints.md       # mapeamento das 2 APIs Efí
 ```
-
-## Como rodar
-
-1. Clone o repositorio
-   ```bash
-   git clone https://github.com/leonardochor-hash/integrador.git
-   cd integrador
-   ```
-
-2. Crie um virtualenv e instale as dependencias
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate   # Linux/Mac
-   # ou .venv\Scripts\activate    # Windows
-   pip install -r requirements.txt
-   ```
-
-3. Configure as credenciais
-   ```bash
-   cp .env.example .env
-   # edite .env com suas credenciais
-   ```
-
-4. Teste a conexao (lista 1a pagina da Zoop, sem alterar nada)
-   ```bash
-   python livepdv_client.py
-   ```
-
-## Uso programatico
-
-```python
-from livepdv_client import LivePDVClient
-import os
-
-with LivePDVClient() as client:
-    client.login(os.environ["LIVEPDV_USERNAME"],
-                 os.environ["LIVEPDV_PASSWORD"])
-
-    # Listar (somente leitura)
-    empresas = client.listar_zoop_empresas()
-    fornecedores = client.listar_fornecedores()
-
-    # Bloqueios - usar com cautela
-    # Marca B (atraso leve):
-    client.bloquear_recebimento_zoop(zoop_id=1826, ativar=True)
-
-    # Marca C (atraso grave):
-    client.bloquear_repasse_total(zoop_id=1826, ativar=True)
-
-    # Casos severos (so via tela Expositores):
-    client.bloquear_vendas_expositor(fornecedor_id=736, ativar=True)
-    client.bloquear_acesso_expositor(fornecedor_id=736, ativar=True)
-
-    # Desbloqueio: passe ativar=False
-    client.bloquear_recebimento_zoop(zoop_id=1826, ativar=False)
-```
-
-## Documentacao tecnica
-
-Veja [`docs/livepdv_endpoints.md`](docs/livepdv_endpoints.md) para o mapa completo de endpoints, payloads e CSRF.
 
 ## Seguranca
 
-- **Nunca commite o arquivo `.env`** (ja esta no `.gitignore` via padrao `env*`).
-- O cliente usa exclusivamente credenciais lidas de variaveis de ambiente.
-- O CSRF token e renovado dinamicamente antes de cada operacao sensivel.
-- Funcoes de bloqueio sao idempotentes: chamar com mesmo valor varias vezes nao causa efeito colateral.
+- ✅ Nenhuma credencial commitada (`.env` no `.gitignore`)
+- ✅ `.env.example` apenas com placeholders
+- ✅ Certificado PIX fora do repo (`./certs/` ignorado)
+- ✅ Nenhum dado real (CNPJ/nome/ID) nos arquivos de documentacao
 
 ## Roadmap
 
-- [x] Cliente LivePDV com 5 niveis de bloqueio
-- [ ] Cliente Airtable (cadastro de marcas + status financeiro)
-- [ ] Cliente Efi (cobrancas)
-- [ ] Cliente Asaas (cobrancas)
-- [ ] Cliente Gmail (notificacoes)
-- [ ] Orquestrador (`runner.py`) - classifica + aplica bloqueios + notifica
-- [ ] Cron / GitHub Actions para execucao agendada
-- [ ] Testes automatizados
+- [x] livepdv_client.py (login, listagens, 5 niveis de bloqueio)
+- [x] efi_client.py (Pagamentos + PIX, deteccao de inadimplencia por CNPJ)
+- [ ] airtable_client.py (CRUD da base de marcas, upsert por nome_fantasia)
+- [ ] asaas_client.py (segunda fonte de cobrancas)
+- [ ] gmail_notifier.py (envio de alertas)
+- [ ] zoho_client.py (CRM)
+- [ ] runner.py (orquestrador: vendas → classificacao → bloqueios → notificacao)
+- [ ] GitHub Actions (cron diario)
 
-## Status
+## Licenca
 
-Em desenvolvimento. Estagio atual: **cliente LivePDV funcional com mapa completo de endpoints de bloqueio**.
+Privado / uso interno.
 
