@@ -23,7 +23,8 @@ import argparse
 import csv
 import os
 import sys
-from dataclasses import dataclass, asdict
+import traceback
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
@@ -39,7 +40,7 @@ except ImportError:
     _HAS_TABULATE = False
 
 
-def _formatar_tabela(headers: list[str], linhas: list[list]) -> str:
+def _formatar_tabela(headers, linhas):
     if _HAS_TABULATE:
         return tabulate(linhas, headers=headers, tablefmt="rounded_outline")
     # Fallback simples
@@ -66,8 +67,8 @@ class LinhaInadimplente:
     cnpj: str
     dias_atraso: int
     valor_aberto: float
-    bloqueio_atual: str       # 'nenhum' | 'recebimento' | 'total' | 'vendas' | 'acesso'
-    classe: str               # 'A' | 'B' | 'C' | '?'
+    bloqueio_atual: str
+    classe: str
     boletos: int
     pix_cobv: int
 
@@ -83,7 +84,6 @@ class LinhaInadimplente:
 # Sugestão de ação por nível de bloqueio
 # ============================================================================
 def sugerir_acao(linha: LinhaInadimplente) -> str:
-    """Retorna a ação recomendada baseada em dias de atraso e valor."""
     d = linha.dias_atraso
     classe = linha.classe
     if d <= 5:
@@ -100,9 +100,9 @@ def sugerir_acao(linha: LinhaInadimplente) -> str:
 
 
 # ============================================================================
-# Mock data — exemplo de 5 marcas fictícias
+# Mock data
 # ============================================================================
-def gerar_mock() -> list[LinhaInadimplente]:
+def gerar_mock():
     return [
         LinhaInadimplente("Bijoux Estrela",  "12.345.678/0001-90", 45, 3200.00, "nenhum",      "C", 2, 1),
         LinhaInadimplente("Atelier Lua",     "23.456.789/0001-01", 18, 1450.00, "recebimento", "B", 1, 0),
@@ -113,12 +113,14 @@ def gerar_mock() -> list[LinhaInadimplente]:
 
 
 # ============================================================================
-# Coleta real — junta LivePDV + Efí
+# Coleta real
 # ============================================================================
-def coletar_real(dias_min: int = 1, cnpj_filtro: Optional[str] = None) -> list[LinhaInadimplente]:
+def coletar_real(dias_min: int = 1, cnpj_filtro: Optional[str] = None):
     """
-    Conecta LivePDV + Efí e gera relatório real.
-    Requer credenciais em .env (LIVEPDV_*, EFI_*).
+    Conecta LivePDV + Efí.
+    Requer variáveis de ambiente:
+      LIVEPDV_BASE_URL, LIVEPDV_USERNAME, LIVEPDV_PASSWORD
+      EFI_CLIENT_ID, EFI_CLIENT_SECRET, EFI_PIX_CERT_PATH (opcional)
     """
     try:
         from livepdv_client import LivePDVClient
@@ -134,46 +136,97 @@ def coletar_real(dias_min: int = 1, cnpj_filtro: Optional[str] = None) -> list[L
     except ImportError:
         pass
 
+    # Lê credenciais do env (já populadas pelo Colab ou .env)
+    lpv_user = os.environ.get("LIVEPDV_USERNAME")
+    lpv_pass = os.environ.get("LIVEPDV_PASSWORD")
+    lpv_base = os.environ.get("LIVEPDV_BASE_URL", "https://expositores.moombox.com.br")
+    if not lpv_user or not lpv_pass:
+        print("[ERRO] LIVEPDV_USERNAME ou LIVEPDV_PASSWORD nao definidos no ambiente.")
+        sys.exit(3)
+
+    expositores = []
+    # ------------------------- LivePDV -------------------------
     print("[1/4] Conectando ao LivePDV...", end=" ", flush=True)
-    lpv = LivePDVClient()
-    lpv.login()
-    expositores = list(lpv.listar_expositores())
-    print(f"OK ({len(expositores)} expositores)")
+    try:
+        lpv = LivePDVClient(base_url=lpv_base)
+        # tentar várias assinaturas de login para máxima compatibilidade
+        try:
+            lpv.login(lpv_user, lpv_pass)
+        except TypeError:
+            try:
+                lpv.login(username=lpv_user, password=lpv_pass)
+            except TypeError:
+                lpv.login()  # versão antiga lia do env
 
+        # listar expositores via método disponível
+        if hasattr(lpv, "listar_expositores"):
+            expositores = list(lpv.listar_expositores())
+        elif hasattr(lpv, "list_expositores"):
+            expositores = list(lpv.list_expositores())
+        elif hasattr(lpv, "listar_fornecedores"):
+            expositores = list(lpv.listar_fornecedores())
+        else:
+            print("AVISO: metodo de listagem de expositores nao encontrado")
+            expositores = []
+        print(f"OK ({len(expositores)} expositores)")
+    except Exception as exc:
+        print(f"FALHOU")
+        print(f"      ! {type(exc).__name__}: {exc}")
+        print(f"      ! Continuando sem dados do LivePDV (nomes de marca virao como 'CNPJ XXX')")
+
+    # ------------------------- Efí -------------------------
+    inadimplentes = {}
     print("[2/4] Listando cobrancas vencidas na Efi...", end=" ", flush=True)
-    efi = EfiClient()
-    inadimplentes = efi.consolidar_todos_inadimplentes(dias_atraso_min=dias_min)
-    print(f"OK ({len(inadimplentes)} CNPJs inadimplentes)")
+    try:
+        efi = EfiClient()
+        inadimplentes = efi.consolidar_todos_inadimplentes(dias_atraso_min=dias_min)
+        print(f"OK ({len(inadimplentes)} CNPJs inadimplentes)")
+    except Exception as exc:
+        print("FALHOU")
+        print(f"      ! {type(exc).__name__}: {exc}")
+        print("      ! Verifique credenciais EFI_CLIENT_ID / EFI_CLIENT_SECRET / EFI_PIX_CERT_PATH")
+        # ainda retorna vazio pra nao crashar
+        return []
 
-    # Indexa expositores por CNPJ (só dígitos)
+    # ------------------------- Cruzamento -------------------------
     print("[3/4] Cruzando CNPJs LivePDV x Efi...", end=" ", flush=True)
     expo_por_cnpj = {}
     for e in expositores:
-        cnpj_d = "".join(filter(str.isdigit, str(e.get("cnpj", ""))))
+        # tolerância a vários formatos de dict
+        cnpj_raw = e.get("cnpj") if isinstance(e, dict) else None
+        if not cnpj_raw and isinstance(e, dict):
+            cnpj_raw = e.get("CNPJ") or e.get("documento")
+        cnpj_d = "".join(filter(str.isdigit, str(cnpj_raw or "")))
         if cnpj_d:
             expo_por_cnpj[cnpj_d] = e
     print("OK")
 
+    # ------------------------- Montagem -------------------------
     print("[4/4] Montando relatorio...", end=" ", flush=True)
-    linhas: list[LinhaInadimplente] = []
+    linhas = []
     for cnpj_d, dados in inadimplentes.items():
         if cnpj_filtro and "".join(filter(str.isdigit, cnpj_filtro)) != cnpj_d:
             continue
-        expo = expo_por_cnpj.get(cnpj_d, {})
-        nome = expo.get("nome") or expo.get("nome_fantasia") or f"CNPJ {cnpj_d}"
+        expo = expo_por_cnpj.get(cnpj_d, {}) or {}
+        nome = (
+            (expo.get("nome") if isinstance(expo, dict) else None)
+            or (expo.get("nome_fantasia") if isinstance(expo, dict) else None)
+            or f"CNPJ {cnpj_d}"
+        )
         bloq = "nenhum"
-        if expo.get("bloqueio_acesso") == "1":
-            bloq = "acesso"
-        elif expo.get("bloqueio_vendas") == "1":
-            bloq = "vendas"
+        if isinstance(expo, dict):
+            if str(expo.get("bloqueio_acesso", "")) == "1":
+                bloq = "acesso"
+            elif str(expo.get("bloqueio_vendas", "")) == "1":
+                bloq = "vendas"
         linhas.append(
             LinhaInadimplente(
                 marca=nome,
                 cnpj=cnpj_d,
-                dias_atraso=dados.get("dias_max", 0) or 0,
-                valor_aberto=dados.get("total_aberto", 0.0),
+                dias_atraso=int(dados.get("dias_max", 0) or 0),
+                valor_aberto=float(dados.get("total_aberto", 0.0)),
                 bloqueio_atual=bloq,
-                classe="?",  # classificacao A/B/C precisa de vendas 30d (proximo passo)
+                classe="?",
                 boletos=len(dados.get("boletos", [])),
                 pix_cobv=len(dados.get("pix_cobv", [])),
             )
@@ -185,7 +238,7 @@ def coletar_real(dias_min: int = 1, cnpj_filtro: Optional[str] = None) -> list[L
 # ============================================================================
 # Renderização
 # ============================================================================
-def imprimir_relatorio(linhas: list[LinhaInadimplente], modo: str) -> None:
+def imprimir_relatorio(linhas, modo):
     titulo = f"  RELATORIO DE MARCAS INADIMPLENTES — MODO {modo.upper()}  "
     ts = datetime.now().strftime("%d/%m/%Y %H:%M")
     print()
@@ -196,10 +249,9 @@ def imprimir_relatorio(linhas: list[LinhaInadimplente], modo: str) -> None:
     print()
 
     if not linhas:
-        print("Nenhuma marca inadimplente encontrada. 🎉")
+        print("Nenhuma marca inadimplente encontrada (ou erro na coleta).")
         return
 
-    # Ordena: maior atraso primeiro
     linhas_ord = sorted(linhas, key=lambda x: (-x.dias_atraso, -x.valor_aberto))
 
     headers = ["#", "Marca", "CNPJ", "Dias", "Em aberto", "Bloqueio", "Classe", "Acao sugerida"]
@@ -227,7 +279,7 @@ def imprimir_relatorio(linhas: list[LinhaInadimplente], modo: str) -> None:
     print()
 
 
-def exportar_csv(linhas: list[LinhaInadimplente], path: str) -> None:
+def exportar_csv(linhas, path):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f, delimiter=";")
@@ -246,28 +298,31 @@ def exportar_csv(linhas: list[LinhaInadimplente], path: str) -> None:
 # ============================================================================
 # CLI
 # ============================================================================
-def main() -> int:
-    p = argparse.ArgumentParser(
-        description="Relatorio de marcas inadimplentes (LivePDV + Efi)"
-    )
+def main():
+    p = argparse.ArgumentParser(description="Relatorio de marcas inadimplentes (LivePDV + Efi)")
     grp = p.add_mutually_exclusive_group(required=True)
-    grp.add_argument("--mock", action="store_true", help="Usa dados ficticios (sem credenciais)")
-    grp.add_argument("--real", action="store_true", help="Conecta LivePDV + Efi reais (precisa .env)")
-    p.add_argument("--dias", type=int, default=1, help="Dias minimos de atraso (default=1)")
-    p.add_argument("--cnpj", type=str, default=None, help="Filtrar por CNPJ especifico")
-    p.add_argument("--csv", action="store_true", help="Exporta CSV em ./relatorios/")
+    grp.add_argument("--mock", action="store_true")
+    grp.add_argument("--real", action="store_true")
+    p.add_argument("--dias", type=int, default=1)
+    p.add_argument("--cnpj", type=str, default=None)
+    p.add_argument("--csv", action="store_true")
     args = p.parse_args()
 
     if args.mock:
         linhas = gerar_mock()
         modo = "mock"
     else:
-        linhas = coletar_real(dias_min=args.dias, cnpj_filtro=args.cnpj)
+        try:
+            linhas = coletar_real(dias_min=args.dias, cnpj_filtro=args.cnpj)
+        except Exception:
+            print("\n[ERRO FATAL] Algo deu errado na coleta:")
+            traceback.print_exc()
+            linhas = []
         modo = "real"
 
     imprimir_relatorio(linhas, modo)
 
-    if args.csv:
+    if args.csv and linhas:
         data_str = datetime.now().strftime("%Y-%m-%d_%H%M")
         path = f"./relatorios/inadimplentes_{modo}_{data_str}.csv"
         exportar_csv(linhas, path)
@@ -277,3 +332,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
