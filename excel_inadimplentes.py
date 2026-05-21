@@ -5,6 +5,8 @@ excel_inadimplentes.py
 Leitor de planilha Excel exportada do painel da Efí (Receber > Gestão de
 cobranças > Boletos > Exportar).
 
+Suporta tanto .xlsx (openpyxl) quanto .xls legado (xlrd==1.2.0).
+
 Estrutura esperada da planilha (cabeçalho na linha 1):
 
     Loja | Número da Cobrança | Valor (R$) | Status | Data de Emissão |
@@ -18,10 +20,10 @@ Saída: lista de dicts no MESMO formato usado pelo efi_client.py para que
 o relatorio_inadimplentes.py possa consumir indistintamente:
 
     {
-        "cnpj": "12345678000100",            # só dígitos
+        "cnpj": "12345678000100",         # só dígitos
         "nome": "Razão social",
-        "valor": 990.00,                      # float em reais
-        "vencimento": "2026-05-20",          # ISO YYYY-MM-DD
+        "valor": 990.00,                  # float em reais
+        "vencimento": "2026-05-20",       # ISO YYYY-MM-DD
         "dias_atraso": 1,
         "numero_cobranca": "1013504771",
         "fonte": "excel",
@@ -33,8 +35,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, date
 from pathlib import Path
-from typing import Iterable, List, Dict, Any, Optional
-
+from typing import Iterable, List, Dict, Any, Optional, Tuple
 
 STATUS_INADIMPLENTES = {"inadimplente", "vencido", "atrasado"}
 
@@ -51,7 +52,6 @@ def _para_float(valor: Any) -> float:
     if isinstance(valor, (int, float)):
         return float(valor)
     s = str(valor).strip()
-    # Formatos comuns: "1.190,00" "1190,00" "1190.00" "R$ 1.190,00"
     s = s.replace("R$", "").replace(" ", "")
     if "," in s and "." in s:
         s = s.replace(".", "").replace(",", ".")
@@ -88,26 +88,63 @@ def _dias_atraso(venc_iso: Optional[str]) -> int:
     return max(0, delta)
 
 
-def carregar_inadimplentes(caminho: str | Path) -> List[Dict[str, Any]]:
-    """Lê o .xlsx e devolve apenas inadimplentes normalizados."""
-    try:
-        import openpyxl
-    except ImportError as e:
-        raise RuntimeError(
-            "openpyxl não instalado. Rode: pip install openpyxl"
-        ) from e
+def _ler_planilha(caminho: Path) -> Tuple[List[str], List[List[Any]]]:
+    """Lê a planilha e devolve (header, linhas). Suporta .xls e .xlsx."""
+    ext = caminho.suffix.lower()
+    if ext == ".xlsx":
+        try:
+            import openpyxl
+        except ImportError as e:
+            raise RuntimeError("openpyxl não instalado. Rode: pip install openpyxl") from e
+        wb = openpyxl.load_workbook(caminho, data_only=True, read_only=True)
+        ws = wb.active
+        rows = list(ws.iter_rows(values_only=True))
+        wb.close()
+        if not rows:
+            return [], []
+        header = [str(c).strip() if c is not None else "" for c in rows[0]]
+        data = [list(r) for r in rows[1:]]
+        return header, data
+    elif ext == ".xls":
+        try:
+            import xlrd
+        except ImportError as e:
+            raise RuntimeError("xlrd==1.2.0 não instalado. Rode: pip install xlrd==1.2.0") from e
+        wb = xlrd.open_workbook(str(caminho))
+        ws = wb.sheet_by_index(0)
+        if ws.nrows == 0:
+            return [], []
+        header = [str(ws.cell_value(0, c)).strip() for c in range(ws.ncols)]
+        data: List[List[Any]] = []
+        for r in range(1, ws.nrows):
+            linha: List[Any] = []
+            for c in range(ws.ncols):
+                cell = ws.cell(r, c)
+                # xlrd type 3 = date
+                if cell.ctype == 3:
+                    try:
+                        y, m, d, *_ = xlrd.xldate_as_tuple(cell.value, wb.datemode)
+                        linha.append(date(y, m, d))
+                    except Exception:
+                        linha.append(cell.value)
+                else:
+                    linha.append(cell.value)
+            data.append(linha)
+        return header, data
+    else:
+        raise ValueError(f"Extensão não suportada: {ext} (use .xls ou .xlsx)")
 
+
+def carregar_inadimplentes(caminho: str | Path) -> List[Dict[str, Any]]:
+    """Lê a planilha e devolve apenas inadimplentes normalizados."""
     caminho = Path(caminho)
     if not caminho.exists():
         raise FileNotFoundError(f"Planilha não encontrada: {caminho}")
 
-    wb = openpyxl.load_workbook(caminho, data_only=True, read_only=True)
-    ws = wb.active
+    header, linhas = _ler_planilha(caminho)
+    if not header:
+        return []
 
-    rows = ws.iter_rows(values_only=True)
-    header = [str(c).strip() if c is not None else "" for c in next(rows)]
-
-    # Mapa: nome de coluna esperado -> índice
     def idx(nome: str) -> Optional[int]:
         nome_low = nome.lower()
         for i, h in enumerate(header):
@@ -119,7 +156,6 @@ def carregar_inadimplentes(caminho: str | Path) -> List[Dict[str, Any]]:
     i_num = idx("Número da Cobrança")
     i_valor = idx("Valor (R$)")
     i_status = idx("Status")
-    i_emissao = idx("Data de Emissão")
     i_nome = idx("Nome")
     i_email = idx("E-mail")
     i_tel = idx("Telefone")
@@ -127,10 +163,12 @@ def carregar_inadimplentes(caminho: str | Path) -> List[Dict[str, Any]]:
     i_venc = idx("Data de Vencimento")
 
     out: List[Dict[str, Any]] = []
-    for row in rows:
-        if row is None or all(c is None for c in row):
+    for row in linhas:
+        if row is None or all(c is None or c == "" for c in row):
             continue
-        status = str(row[i_status]).strip().lower() if i_status is not None and row[i_status] else ""
+        status = ""
+        if i_status is not None and row[i_status]:
+            status = str(row[i_status]).strip().lower()
         if status not in STATUS_INADIMPLENTES:
             continue
 
@@ -156,7 +194,6 @@ def carregar_inadimplentes(caminho: str | Path) -> List[Dict[str, Any]]:
             "fonte": "excel",
         })
 
-    wb.close()
     return out
 
 
@@ -183,7 +220,7 @@ def consolidar_por_cnpj(itens: Iterable[Dict[str, Any]]) -> Dict[str, Dict[str, 
 if __name__ == "__main__":
     import sys, json
     if len(sys.argv) < 2:
-        print("uso: python excel_inadimplentes.py arquivo.xlsx")
+        print("uso: python excel_inadimplentes.py arquivo.xls(x)")
         sys.exit(1)
     inad = carregar_inadimplentes(sys.argv[1])
     print(f"[excel_inadimplentes] {len(inad)} inadimplentes carregados")
