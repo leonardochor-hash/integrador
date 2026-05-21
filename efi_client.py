@@ -7,7 +7,7 @@ Cliente Python para as APIs da Efí (antiga Gerencianet).
 Cobre os dois universos da Efí:
 
   1) Efí Pagamentos (boletos, carnês, links de pagamento)
-     - Base produção: https://api.gerencianet.com.br
+     - Base produção: https://cobrancas.api.efipay.com.br
      - Autenticação:  Basic Auth (client_id:client_secret) -> Bearer token
 
   2) Efí Pix (cobranças PIX imediatas e com vencimento)
@@ -48,14 +48,14 @@ class EfiPagamentosClient:
     """Cliente para a API de Cobranças (boletos/carnês) da Efí.
 
     Endpoints usados:
-      POST /oauth/token
+      POST /v1/authorize
       GET  /v1/charges
       GET  /v1/charge/:id
       GET  /v1/charge/:id/history
     """
 
-    BASE_PROD = "https://api.gerencianet.com.br"
-    BASE_SBX = "https://sandbox.gerencianet.com.br"
+    BASE_PROD = "https://cobrancas.api.efipay.com.br"
+    BASE_SBX = "https://cobrancas-h.api.efipay.com.br"
 
     def __init__(self, client_id: str, client_secret: str, sandbox: bool = False):
         if not client_id or not client_secret:
@@ -75,7 +75,7 @@ class EfiPagamentosClient:
             f"{self.client_id}:{self.client_secret}".encode()
         ).decode()
         resp = self._session.post(
-            f"{self.base}/oauth/token",
+            f"{self.base}/v1/authorize",
             headers={
                 "Authorization": f"Basic {auth}",
                 "Content-Type": "application/json",
@@ -109,9 +109,28 @@ class EfiPagamentosClient:
         status: Optional[str] = None,
         vencimento_de: Optional[str] = None,
         vencimento_ate: Optional[str] = None,
+        charge_type: str = "billet",
+        begin_date: Optional[str] = None,
+        end_date: Optional[str] = None,
     ) -> dict:
-        """GET /v1/charges (cobranças = boletos/carnês)."""
-        params: dict = {"limit": limit, "offset": offset}
+        """GET /v1/charges (cobranças = boletos/carnês).
+
+        Parâmetros obrigatórios na API atual:
+            - charge_type: "billet" ou "carnet"
+            - begin_date / end_date: intervalo máximo de 1 ano (YYYY-MM-DD)
+        """
+        # Defaults: último ano até hoje
+        if not end_date:
+            end_date = datetime.now().strftime("%Y-%m-%d")
+        if not begin_date:
+            begin_date = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
+        params: dict = {
+            "limit": limit,
+            "offset": offset,
+            "charge_type": charge_type,
+            "begin_date": begin_date,
+            "end_date": end_date,
+        }
         if status:
             params["status"] = status
         if vencimento_de:
@@ -165,7 +184,7 @@ class EfiPixClient:
     """Cliente para a API Pix (BACEN) da Efí com mTLS.
 
     Endpoints usados:
-      POST /oauth/token
+      POST /v1/authorize
       GET  /v2/cob
       GET  /v2/cob/:txid
       GET  /v2/cobv
@@ -207,7 +226,7 @@ class EfiPixClient:
             f"{self.client_id}:{self.client_secret}".encode()
         ).decode()
         resp = self._session.post(
-            f"{self.base}/oauth/token",
+            f"{self.base}/v1/authorize",
             headers={
                 "Authorization": f"Basic {auth}",
                 "Content-Type": "application/json",
